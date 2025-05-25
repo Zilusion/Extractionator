@@ -1,11 +1,158 @@
 import fs from 'fs/promises';
-import {
-	getStandardCategory,
-} from './categoryDefinitions.js';
+import { getStandardCategory } from './categoryDefinitions.js';
+
+// В начале скрипта postprocessGames.js
+import fetch from 'node-fetch'; // Если используешь node-fetch
+import path from 'path';
+import { fileURLToPath } from 'url'; // Для __dirname в ES Modules
+import puppeteer from 'puppeteer'; // Puppeteer для headless браузера
+
+// --- Новая Конфигурация ---
+const DOWNLOAD_IMAGES_VIA_PUPPETEER = true;
+const LOCAL_IMAGE_FOLDER = 'downloaded_images'; // Папка для скачанных изображений
+const IMAGE_BASE_URL_ON_VDS = `http://5.101.66.223/images/boardgames`; // Твой базовый URL на VDS
+const DELAY_BETWEEN_IMAGE_DOWNLOADS = 0;
+
+// Для ES Modules, чтобы получить аналог __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const INPUT_JSON_FILE = 'games_enriched_from_bgg.json';
 const OUTPUT_PROCESSED_JSON_FILE = 'games_processed_for_ct_v5.json';
 const OUTPUT_CSV_FILE = 'games_for_commercetools_v5.csv';
+
+const localImagesBasePath = path.join(__dirname, LOCAL_IMAGE_FOLDER);
+
+// ... (после вспомогательных функций parse...)
+
+async function downloadImageIfNotExists(imageUrl, localFolderPath, fileName) {
+	if (!DOWNLOAD_IMAGES) {
+		// console.log(`   [Image] Skipping download for: ${fileName} (DOWNLOAD_IMAGES is false)`);
+		return path.join(localFolderPath, fileName); // Возвращаем предполагаемый путь, даже если не скачивали
+	}
+
+	const fullLocalPath = path.join(localFolderPath, fileName);
+	try {
+		// Проверяем, существует ли файл
+		await fs.access(fullLocalPath);
+		console.log(`   [Image] Exists locally: ${fileName}`);
+		return fullLocalPath;
+	} catch (e) {
+		// Файл не существует, скачиваем
+		console.log(`   [Image] Downloading: ${imageUrl} as ${fileName}`);
+		try {
+			const response = await fetch(imageUrl, {
+				headers: {
+					'User-Agent':
+						'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+					Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+					'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+					// 'Referer': BASE_URL, // Можно попробовать добавить Referer, но он должен быть релевантным
+				},
+			});
+			if (!response.ok) {
+				console.error(
+					`   [Image] Failed to download ${imageUrl}: ${response.status} ${response.statusText}`
+				);
+				return null;
+			}
+			await fs.mkdir(localFolderPath, { recursive: true });
+			const fileStream = fs.createWriteStream(fullLocalPath);
+			await new Promise((resolve, reject) => {
+				response.body.pipe(fileStream);
+				response.body.on('error', reject);
+				fileStream.on('finish', resolve);
+			});
+			console.log(`   [Image] Downloaded successfully: ${fileName}`);
+			return fullLocalPath;
+		} catch (downloadError) {
+			console.error(
+				`   [Image] Error downloading ${imageUrl}:`,
+				downloadError
+			);
+			return null;
+		}
+	}
+}
+
+async function downloadImageWithPuppeteer(
+	page,
+	imageUrl,
+	localFolderPath,
+	fileName
+) {
+	if (!DOWNLOAD_IMAGES_VIA_PUPPETEER) {
+		console.log(
+			`   [Image] Skipping download for: ${fileName} (DOWNLOAD_IMAGES_VIA_PUPPETEER is false)`
+		);
+		// Возвращаем предполагаемый путь, даже если не скачивали, чтобы URL формировался правильно
+		return path.join(localFolderPath, fileName);
+	}
+
+	const fullLocalPath = path.join(localFolderPath, fileName);
+
+	try {
+		await fs.access(fullLocalPath); // Проверяем, существует ли файл
+		console.log(`   [ImagePuppeteer] Exists locally: ${fileName}`);
+		return fullLocalPath;
+	} catch (e) {
+		// Файл не существует, скачиваем
+		console.log(
+			`   [ImagePuppeteer] Downloading: ${imageUrl} as ${fileName}`
+		);
+		let imagePage = null; // Инициализируем здесь для доступа в catch/finally
+		try {
+			imagePage = await page.browser().newPage();
+			await imagePage.setUserAgent(await page.browser().userAgent()); // Используем тот же User-Agent
+			// Можно добавить setExtraHTTPHeaders, если нужно (например, Referer)
+			// await imagePage.setExtraHTTPHeaders({'Referer': 'https://www.mosigra.ru/'});
+
+			const response = await imagePage.goto(imageUrl, {
+				timeout: 60000,
+				waitUntil: 'networkidle0',
+			});
+
+			if (!response || !response.ok()) {
+				console.error(
+					`   [ImagePuppeteer] Failed to navigate to image ${imageUrl}: Status ${response?.status()}`
+				);
+				if (imagePage) await imagePage.close();
+				return null;
+			}
+
+			const imageBuffer = await response.buffer();
+			if (imageBuffer.length === 0) {
+				console.error(
+					`   [ImagePuppeteer] Downloaded empty buffer for ${imageUrl}`
+				);
+				if (imagePage) await imagePage.close();
+				return null;
+			}
+
+			await fs.mkdir(localFolderPath, { recursive: true });
+			await fs.writeFile(fullLocalPath, imageBuffer);
+
+			console.log(
+				`   [ImagePuppeteer] Downloaded successfully: ${fileName}`
+			);
+			if (imagePage) await imagePage.close();
+			return fullLocalPath;
+		} catch (downloadError) {
+			console.error(
+				`   [ImagePuppeteer] Error downloading image ${imageUrl} via Puppeteer:`,
+				downloadError
+			);
+			if (imagePage && !imagePage.isClosed()) {
+				try {
+					await imagePage.close();
+				} catch (closeError) {
+					/* игнорируем */
+				}
+			}
+			return null;
+		}
+	}
+}
 
 async function main() {
 	console.log(`Reading data from ${INPUT_JSON_FILE}...`);
@@ -21,6 +168,24 @@ async function main() {
 	console.log(`Processing ${rawProducts.length} products...`);
 	const processedProducts = [];
 	let productCounter = 1;
+	// Инициализация Puppeteer один раз для всего процесса скачивания изображений
+	let browser = null;
+	let pageForDownloading = null; // Основная страница для скачивания (будем открывать новые вкладки от нее)
+
+	if (DOWNLOAD_IMAGES_VIA_PUPPETEER) {
+		console.log(
+			'[ImageDownloader] Launching browser for image downloads...'
+		);
+		browser = await puppeteer.launch({
+			headless: false, // <--- БРАУЗЕР БУДЕТ ВИДИМЫМ
+			// args: ['--no-sandbox', '--disable-setuid-sandbox'] // Может понадобиться на Linux
+		});
+		pageForDownloading = await browser.newPage();
+		await pageForDownloading.setUserAgent(
+			'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36' // Более свежий User-Agent
+		);
+		console.log('[ImageDownloader] Browser launched.');
+	}
 
 	for (const rawProduct of rawProducts) {
 		const nameRu = rawProduct.name?.ru || '';
@@ -57,6 +222,54 @@ async function main() {
 			// 'mechanics': 'ключ_механики1;ключ_механики2', // Для Set of Enum
 		};
 
+		let finalMainImageUrl = '';
+		const finalAdditionalImages = [];
+		const productSlugForImage =
+			rawProduct.slug?.en || rawProduct.slug?.ru || generatedProductKey;
+
+		if (rawProduct.mainImageUrl) {
+			const originalUrl = rawProduct.mainImageUrl;
+			const imageName = `${productSlugForImage}-main.webp`;
+			// await downloadImageIfNotExists(
+			// 	originalUrl,
+			// 	localImagesBasePath,
+			// 	imageName
+			// );
+			await downloadImageWithPuppeteer(
+				pageForDownloading,
+				originalUrl,
+				localImagesBasePath,
+				imageName
+			);
+			finalMainImageUrl = `${IMAGE_BASE_URL_ON_VDS}/${imageName}`;
+		}
+
+		if (
+			rawProduct.additionalImages &&
+			rawProduct.additionalImages.length > 0
+		) {
+			for (let i = 0; i < rawProduct.additionalImages.length; i++) {
+				const originalUrl = rawProduct.additionalImages[i];
+				if (originalUrl) {
+					const imageName = `${productSlugForImage}-${i + 1}.webp`;
+					// await downloadImageIfNotExists(
+					// 	originalUrl,
+					// 	localImagesBasePath,
+					// 	imageName
+					// );
+					await downloadImageWithPuppeteer(
+						pageForDownloading,
+						originalUrl,
+						localImagesBasePath,
+						imageName
+					);
+					finalAdditionalImages.push(
+						`${IMAGE_BASE_URL_ON_VDS}/${imageName}`
+					);
+				}
+			}
+		}
+
 		const processed = {
 			key: generatedProductKey,
 			productTypeKey: 'board-game',
@@ -70,8 +283,8 @@ async function main() {
 			mainCategoryKeyCt: null,
 			categoryKeysCt: [],
 			price: { rub: rawProduct.price?.rub },
-			mainImageUrl: rawProduct.mainImageUrl,
-			additionalImages: rawProduct.additionalImages || [],
+			mainImageUrl: finalMainImageUrl,
+			additionalImages: finalAdditionalImages,
 			attributes: attributesForCsv,
 			meta: rawProduct.meta,
 			variantKey: generatedVariantKey,
@@ -107,6 +320,11 @@ async function main() {
 
 		processedProducts.push(processed);
 		productCounter++;
+	}
+
+	if (browser) {
+		await browser.close();
+		console.log('[ImageDownloader] Browser closed.');
 	}
 
 	await fs.writeFile(
@@ -269,14 +487,14 @@ async function generateCommerceToolsCSV(products, filePath) {
 
 				const imageRow = [];
 				imageRow.push(product.key || '');
-				imageRow.push(''); 
-				imageRow.push(''); 
 				imageRow.push('');
 				imageRow.push('');
-				imageRow.push(''); 
-				imageRow.push(''); 
-				imageRow.push(''); 
-				imageRow.push(''); 
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push('');
 
 				imageRow.push(product.variantKey || '');
 				imageRow.push(product.sku || '');
@@ -285,7 +503,7 @@ async function generateCommerceToolsCSV(products, filePath) {
 				imageRow.push('');
 				imageRow.push('');
 				imageRow.push('');
-				imageRow.push(''); 
+				imageRow.push('');
 
 				usedCtAttributeNames.forEach(() => imageRow.push(''));
 				priceHeaders.forEach(() => imageRow.push(''));
