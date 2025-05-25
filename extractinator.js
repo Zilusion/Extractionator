@@ -3,12 +3,12 @@ import fs from 'fs/promises';
 
 // --- Конфигурация ---
 const START_URL = 'https://www.mosigra.ru/nastolnye-igry/';
-const OUTPUT_JSON_FILE = 'games_refined_v2.json';
+const OUTPUT_JSON_FILE = 'games3.json';
 const BASE_URL = 'https://www.mosigra.ru';
-const MAX_CATALOG_PAGES_TO_SCRAPE = 2;
+const MAX_CATALOG_PAGES_TO_SCRAPE = Infinity;
 const MAX_PRODUCT_DETAILS_TO_SCRAPE = Infinity;
-const DELAY_BETWEEN_REQUESTS = 1500;
-const DELAY_VARIATION = 1000;
+const DELAY_BETWEEN_REQUESTS = 0;
+const DELAY_VARIATION = 0;
 
 // --- Вспомогательные функции ---
 function sleep(ms) {
@@ -206,6 +206,7 @@ async function scrapeProductDetailsPage(page, productUrl) {
 			countryOfOrigin: undefined,
 			weight: undefined,
 			allCategories: [],
+			mainCategory: null,
 			priceFromPageRub: null,
 			sourceMeta: {
 				sourceUrl: url,
@@ -340,8 +341,10 @@ async function scrapeProductDetailsPage(page, productUrl) {
 			const ageText = paramsDiv
 				.querySelector('.age span')
 				?.textContent?.trim();
-			if (ageText && !productDetails.ageRaw)
+			if (ageText && !productDetails.ageRaw) {
+				console.log(ageText);
 				productDetails.ageRaw = ageText;
+			}
 		}
 
 		const categoryBlock = document.querySelector(
@@ -374,21 +377,20 @@ async function scrapeProductDetailsPage(page, productUrl) {
 					}
 				});
 		}
-		document
-			.querySelectorAll(
+		const breadcrumbLinks = Array.from(
+			document.querySelectorAll(
 				'.breadcrumbs span[itemprop="itemListElement"] > a[itemprop="item"]'
 			)
-			.forEach((a) => {
-				const name = a
-					.querySelector('span[itemprop="name"]')
-					?.textContent?.trim();
-				const breadcrumbUrl = a.getAttribute('href');
-				if (
-					name &&
-					breadcrumbUrl &&
-					name.toLowerCase() !== 'главная' &&
-					name.toLowerCase() !== 'каталог'
-				) {
+		);
+		let lastValidBreadcrumbCategory = null;
+		breadcrumbLinks.forEach((a) => {
+			const name = a
+				.querySelector('span[itemprop="name"]')
+				?.textContent?.trim();
+			const breadcrumbUrl = a.getAttribute('href');
+			if (name && breadcrumbUrl) {
+				const lowerName = name.toLowerCase();
+				if (lowerName !== 'главная' && lowerName !== 'каталог') {
 					try {
 						const url = new URL(breadcrumbUrl, document.baseURI)
 							.href;
@@ -398,21 +400,38 @@ async function scrapeProductDetailsPage(page, productUrl) {
 							.pop();
 						if (
 							key &&
-							!productDetails.allCategories.find(
-								(c) => c.key === key
+							!['allgames', 'nastolnye-igry'].includes(
+								key.toLowerCase()
 							)
 						) {
-							productDetails.allCategories.push({
-								nameRu: name,
+							// Более строгая фильтрация для хлебных крошек
+							const categoryObj = {
+								name: {
+									ru: name,
+									en: '',
+								},
 								key: key,
 								sourceUrl: url,
-							});
+							};
+							if (
+								!productDetails.allCategories.find(
+									(c) => c.key === key
+								)
+							) {
+								productDetails.allCategories.push(categoryObj);
+							}
+							lastValidBreadcrumbCategory = categoryObj; // Запоминаем последнюю "значимую" категорию
 						}
 					} catch (e) {
-						console.error(e);
+						/* ignore */
 					}
 				}
-			});
+			}
+		});
+		if (lastValidBreadcrumbCategory) {
+			productDetails.mainCategory = lastValidBreadcrumbCategory;
+		}
+
 		productDetails.allCategories = productDetails.allCategories.filter(
 			(cat, index, self) =>
 				index === self.findIndex((c) => c.key === cat.key)
@@ -490,7 +509,11 @@ async function scrapeProductDetailsPage(page, productUrl) {
 				const { minPlayers, maxPlayers } = parsePlayerCount(
 					detailsPageData.playersRaw
 				);
-				const ageRecommended = parseAge(detailsPageData.ageRaw);
+				const ageRecommended =
+					parseInt(
+						detailsPageData.ageRaw?.match(/\d+/)?.[0] || '0',
+						10
+					) || null;
 				const { minPlaytime, maxPlaytime } = parsePlaytime(
 					detailsPageData.playtimeRaw
 				);
@@ -528,13 +551,21 @@ async function scrapeProductDetailsPage(page, productUrl) {
 						name: { ru: cat.nameRu, en: '' },
 						key: cat.key,
 					})),
-					brand: detailsPageData.brand || summary.brandFromCard,
+					mainCategory: detailsPageData.mainCategory,
+					brand: {
+						ru: detailsPageData.brand || summary.brandFromCard,
+						en: '',
+					},
 					minPlayers: minPlayers,
 					maxPlayers: maxPlayers,
 					ageRecommended: ageRecommended,
 					minPlaytime: minPlaytime,
 					maxPlaytime: maxPlaytime,
-					countryOfOrigin: detailsPageData.countryOfOrigin,
+					countryOfOrigin: {
+						ru: detailsPageData.countryOfOrigin || '',
+						en: '',
+					},
+
 					weight: detailsPageData.weight,
 					meta: {
 						sourceUrl: summary.productPageUrl,
@@ -543,31 +574,6 @@ async function scrapeProductDetailsPage(page, productUrl) {
 							detailsPageData.sourceMeta.complectation,
 					},
 				};
-
-				const topLevelAttributes = [
-					'brand',
-					'minPlayers',
-					'maxPlayers',
-					'ageRecommended',
-					'minPlaytime',
-					'maxPlaytime',
-					'countryOfOrigin',
-					'weight',
-				];
-				topLevelAttributes.forEach((key) => {
-					if (
-						productEntry[key] === null ||
-						productEntry[key] === undefined
-					) {
-						delete productEntry[key];
-					}
-				});
-				if (productEntry.categories.length === 0)
-					delete productEntry.categories;
-				if (productEntry.price.rub === null)
-					delete productEntry.price.rub;
-				if (Object.keys(productEntry.price).length === 0)
-					delete productEntry.price;
 
 				finalProductsData.push(productEntry);
 			}
