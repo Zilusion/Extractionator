@@ -1,12 +1,11 @@
 import fs from 'fs/promises';
 import {
-	allSubCategoryMaps,
 	getStandardCategory,
 } from './categoryDefinitions.js';
 
-const INPUT_JSON_FILE = 'games3.json';
-const OUTPUT_PROCESSED_JSON_FILE = 'games_processed_for_ct_v4.json';
-const OUTPUT_CSV_FILE = 'games_for_commercetools_v4.csv';
+const INPUT_JSON_FILE = 'games_enriched_from_bgg.json';
+const OUTPUT_PROCESSED_JSON_FILE = 'games_processed_for_ct_v5.json';
+const OUTPUT_CSV_FILE = 'games_for_commercetools_v5.csv';
 
 async function main() {
 	console.log(`Reading data from ${INPUT_JSON_FILE}...`);
@@ -21,6 +20,7 @@ async function main() {
 
 	console.log(`Processing ${rawProducts.length} products...`);
 	const processedProducts = [];
+	let productCounter = 1;
 
 	for (const rawProduct of rawProducts) {
 		const nameRu = rawProduct.name?.ru || '';
@@ -29,8 +29,14 @@ async function main() {
 		const descriptionEn = rawProduct.description?.en || '';
 		const publisherRu = rawProduct.brand.ru || '';
 		const publisherEn = rawProduct.brand.en || '';
-		const countryOfOriginRu = (rawProduct.countryOfOrigin.ru || '').split(',')[0] || '';
-		const countryOfOriginEn = (rawProduct.countryOfOrigin.en || '').split(',')[0] || '';
+		const countryOfOriginRu =
+			(rawProduct.countryOfOrigin.ru || '').split(',')[0] || '';
+		const countryOfOriginEn =
+			(rawProduct.countryOfOrigin.en || '').split(',')[0] || '';
+
+		const generatedProductKey = String(productCounter).padStart(4, '0');
+		const generatedVariantKey = `${generatedProductKey}-1`;
+		const generatedSku = `${generatedProductKey}-1`;
 
 		const attributesForCsv = {
 			'players-min': rawProduct.minPlayers,
@@ -52,7 +58,7 @@ async function main() {
 		};
 
 		const processed = {
-			key: rawProduct.key,
+			key: generatedProductKey,
 			productTypeKey: 'board-game',
 			name: { ru: nameRu, en: nameEn },
 			slug: {
@@ -60,7 +66,7 @@ async function main() {
 				en: rawProduct.slug?.en,
 			},
 			description: { ru: descriptionRu, en: descriptionEn },
-			sku: rawProduct.sku,
+			sku: generatedSku,
 			mainCategoryKeyCt: null,
 			categoryKeysCt: [],
 			price: { rub: rawProduct.price?.rub },
@@ -68,6 +74,7 @@ async function main() {
 			additionalImages: rawProduct.additionalImages || [],
 			attributes: attributesForCsv,
 			meta: rawProduct.meta,
+			variantKey: generatedVariantKey,
 		};
 
 		const ctCategories = new Set();
@@ -98,16 +105,8 @@ async function main() {
 		}
 		processed.categoryKeysCt = Array.from(ctCategories);
 
-		if (!processed.mainCategoryKeyCt) delete processed.mainCategoryKeyCt;
-		if (processed.categoryKeysCt.length === 0)
-			delete processed.categoryKeysCt;
-		if (processed.price.rub === null || processed.price.rub === undefined)
-			delete processed.price.rub;
-		if (Object.keys(processed.price).length === 0) delete processed.price;
-		if (Object.keys(processed.attributes).length === 0)
-			delete processed.attributes;
-
 		processedProducts.push(processed);
+		productCounter++;
 	}
 
 	await fs.writeFile(
@@ -204,7 +203,7 @@ async function generateCommerceToolsCSV(products, filePath) {
 				.replace(/\n/g, '\\n')
 				.replace(/"/g, '""')}"`
 		);
-		row.push(`${product.key || ''}`);
+		row.push(`${product.variantKey || ''}`);
 		row.push(product.sku || '');
 		row.push('zero-tax');
 		row.push('tax-category');
@@ -243,7 +242,7 @@ async function generateCommerceToolsCSV(products, filePath) {
 
 		// Цена (рубли)
 		if (product.price?.rub !== undefined && product.price.rub !== null) {
-			row.push(`${product.key || ''}-price-rub`);
+			row.push(`${product.key || ''}-1`);
 			row.push('RUB');
 			row.push(product.price.rub * 100);
 			row.push('centPrecision');
@@ -263,6 +262,47 @@ async function generateCommerceToolsCSV(products, filePath) {
 		}
 
 		csvContent += row.join(',') + '\n';
+
+		if (product.additionalImages && product.additionalImages.length > 0) {
+			product.additionalImages.forEach((imageUrl, index) => {
+				if (!imageUrl) return;
+
+				const imageRow = [];
+				imageRow.push(product.key || '');
+				imageRow.push(''); 
+				imageRow.push(''); 
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push(''); 
+				imageRow.push(''); 
+				imageRow.push(''); 
+				imageRow.push(''); 
+
+				imageRow.push(product.variantKey || '');
+				imageRow.push(product.sku || '');
+
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push('');
+				imageRow.push(''); 
+
+				usedCtAttributeNames.forEach(() => imageRow.push(''));
+				priceHeaders.forEach(() => imageRow.push(''));
+
+				imageRow.push(imageUrl);
+				imageRow.push(
+					`"${(product.name?.ru || `Image ${index + 1}`).replace(
+						/"/g,
+						'""'
+					)}"`
+				);
+				imageRow.push('1024');
+				imageRow.push('1024');
+
+				csvContent += imageRow.join(',') + '\n';
+			});
+		}
 	}
 
 	try {
