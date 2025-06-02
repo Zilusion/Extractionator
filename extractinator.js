@@ -21,13 +21,6 @@ function normalizeText(text) {
 	return text ? text.replace(/\s+/g, ' ').trim() : '';
 }
 
-function parsePriceInRubles(priceStr) {
-	if (!priceStr) return null;
-	const cleaned = priceStr.replace(/\s*₽/g, '').replace(/\s/g, '');
-	const price = parseInt(cleaned, 10);
-	return isNaN(price) ? null : price;
-}
-
 function parsePlayerCount(playerText) {
 	if (!playerText) return { minPlayers: null, maxPlayers: null };
 	playerText = normalizeText(playerText.toLowerCase());

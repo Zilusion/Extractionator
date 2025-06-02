@@ -8,10 +8,11 @@ import { fileURLToPath } from 'url'; // Для __dirname в ES Modules
 import puppeteer from 'puppeteer'; // Puppeteer для headless браузера
 
 // --- Новая Конфигурация ---
-const DOWNLOAD_IMAGES_VIA_PUPPETEER = true;
+const DOWNLOAD_IMAGES_VIA_PUPPETEER = false;
 const LOCAL_IMAGE_FOLDER = 'downloaded_images'; // Папка для скачанных изображений
-const IMAGE_BASE_URL_ON_VDS = `http://5.101.66.223/images/boardgames`; // Твой базовый URL на VDS
+const IMAGE_BASE_URL_ON_VDS = `http://pathix.ru/images/boardgames`; // Твой базовый URL на VDS
 const DELAY_BETWEEN_IMAGE_DOWNLOADS = 0;
+const MAX_PARALLEL_IMAGE_DOWNLOADS_PER_PRODUCT = 100;
 
 // Для ES Modules, чтобы получить аналог __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -222,11 +223,10 @@ async function main() {
 			// 'mechanics': 'ключ_механики1;ключ_механики2', // Для Set of Enum
 		};
 
-		let finalMainImageUrl = '';
-		const finalAdditionalImages = [];
 		const productSlugForImage =
 			rawProduct.slug?.en || rawProduct.slug?.ru || generatedProductKey;
 
+		const imagesToDownload = [];
 		if (rawProduct.mainImageUrl) {
 			const originalUrl = rawProduct.mainImageUrl;
 			const imageName = `${productSlugForImage}-main.webp`;
@@ -235,13 +235,20 @@ async function main() {
 			// 	localImagesBasePath,
 			// 	imageName
 			// );
-			await downloadImageWithPuppeteer(
-				pageForDownloading,
-				originalUrl,
-				localImagesBasePath,
-				imageName
-			);
-			finalMainImageUrl = `${IMAGE_BASE_URL_ON_VDS}/${imageName}`;
+			// await downloadImageWithPuppeteer(
+			// 	pageForDownloading,
+			// 	originalUrl,
+			// 	localImagesBasePath,
+			// 	imageName
+			// );
+			// finalMainImageUrl = `${IMAGE_BASE_URL_ON_VDS}/${imageName}`;
+			imagesToDownload.push({
+				url: originalUrl,
+				localPath: path.join(localImagesBasePath, imageName),
+				// targetVdsUrl: originalUrl,
+				targetVdsUrl: `${IMAGE_BASE_URL_ON_VDS}/${imageName}`,
+				isMain: true,
+			});
 		}
 
 		if (
@@ -257,17 +264,89 @@ async function main() {
 					// 	localImagesBasePath,
 					// 	imageName
 					// );
-					await downloadImageWithPuppeteer(
-						pageForDownloading,
-						originalUrl,
-						localImagesBasePath,
-						imageName
-					);
-					finalAdditionalImages.push(
-						`${IMAGE_BASE_URL_ON_VDS}/${imageName}`
-					);
+					// await downloadImageWithPuppeteer(
+					// 	pageForDownloading,
+					// 	originalUrl,
+					// 	localImagesBasePath,
+					// 	imageName
+					// );
+					// finalAdditionalImages.push(
+					// 	`${IMAGE_BASE_URL_ON_VDS}/${imageName}`
+					// );
+					imagesToDownload.push({
+						url: originalUrl,
+						localPath: path.join(localImagesBasePath, imageName),
+						// targetVdsUrl: originalUrl,
+						targetVdsUrl: `${IMAGE_BASE_URL_ON_VDS}/${imageName}`,
+						isMain: false,
+					});
 				}
 			}
+		}
+
+		let finalMainImageUrl = '';
+		const finalAdditionalImages = [];
+
+		if (
+			DOWNLOAD_IMAGES_VIA_PUPPETEER &&
+			pageForDownloading &&
+			imagesToDownload.length > 0
+		) {
+			console.log(
+				`   [ImageBatch] Downloading ${imagesToDownload.length} images for ${productSlugForImage}...`
+			);
+			const downloadPromises = [];
+			for (const imageInfo of imagesToDownload) {
+				// Создаем промис для каждой загрузки
+				const downloadPromise = downloadImageWithPuppeteer(
+					pageForDownloading, // Передаем основную страницу (или инстанс браузера)
+					imageInfo.url,
+					localImagesBasePath, // Передаем только папку
+					path.basename(imageInfo.localPath) // Передаем только имя файла
+				)
+					.then((downloadedPath) => {
+						if (downloadedPath) {
+							if (imageInfo.isMain) {
+								finalMainImageUrl = imageInfo.targetVdsUrl;
+							} else {
+								finalAdditionalImages.push(
+									imageInfo.targetVdsUrl
+								);
+							}
+						}
+					})
+					.catch((err) => {
+						// Ошибки уже логируются внутри downloadImageWithPuppeteer
+						console.error(
+							`   [ImageBatch] Error in promise for ${imageInfo.url}: ${err}`
+						);
+					});
+				downloadPromises.push(downloadPromise);
+
+				// Если достигли лимита параллельных загрузок, ждем их завершения
+				if (
+					downloadPromises.length >=
+					MAX_PARALLEL_IMAGE_DOWNLOADS_PER_PRODUCT
+				) {
+					await Promise.all(downloadPromises);
+					downloadPromises.length = 0; // Очищаем массив для следующей пачки
+					// await sleep(DELAY_BETWEEN_IMAGE_DOWNLOADS); // Пауза между пачками
+				}
+			}
+			// Ждем завершения оставшихся загрузок
+			if (downloadPromises.length > 0) {
+				await Promise.all(downloadPromises);
+				// await sleep(DELAY_BETWEEN_IMAGE_DOWNLOADS);
+			}
+		} else if (!DOWNLOAD_IMAGES_VIA_PUPPETEER) {
+			// Если скачивание отключено, просто формируем URL
+			imagesToDownload.forEach((imageInfo) => {
+				if (imageInfo.isMain) {
+					finalMainImageUrl = imageInfo.targetVdsUrl;
+				} else {
+					finalAdditionalImages.push(imageInfo.targetVdsUrl);
+				}
+			});
 		}
 
 		const processed = {
